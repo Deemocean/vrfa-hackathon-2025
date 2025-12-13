@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Mac
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Project Specific
+assets/generated/
+outputs/
+multirun/
+*.log
