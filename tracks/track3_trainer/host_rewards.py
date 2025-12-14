@@ -40,9 +40,9 @@ class HoSTRewardCalculator:
     H_STAGE2 = 1.0  # Standing stage
 
     # Group weights - increased task weight to prioritize standing up
-    W_TASK = 3.0   # Increased from 2.5 to emphasize getting up
-    W_STYLE = 1.2  # Reduced from 1.0 to allow more exploration early on
-    W_REGU = 0.8  # Reduced from 0.1 to not over-penalize movement
+    W_TASK = 5.0   # Increased from 2.5 to emphasize getting up
+    W_STYLE = 1.1  # Reduced from 1.0 to allow more exploration early on
+    W_REGU = 0.1  # Reduced from 0.1 to not over-penalize movement
     W_POST = 2.0
 
     def __init__(self, model, data):
@@ -254,62 +254,66 @@ class HoSTRewardCalculator:
             return 0.5 * feet_count
         else:
             # Penalty for losing all foot contact when should be standing
-            return -5.0
+            return -10.0
 
     def task_standing_stability(self):
         """
         Reward for maintaining stable standing position.
-        Large continuous reward when standing, penalty for instability.
+        Balanced approach: encourage standing, gently discourage jumping.
         """
         h_base = self._get_base_height()
         h_pelvis = self.data.xpos[self._pelvis_id, 2]
-        orientation = self._get_base_orientation()
-        omega = self._get_base_angular_velocity()
         v = self._get_base_linear_velocity()
+        v_z = v[2]  # Vertical velocity
 
         reward = 0.0
+        feet_count = self._get_feet_contact_count()
 
-        # Standing condition: base > 1.1m and pelvis > 0.85m
-        if h_base > 1.1 and h_pelvis > 0.85:
+        # === STANDING REWARDS (main driver) ===
+        if h_base > 1.0 and h_pelvis > 0.8:
             # Base standing reward
             reward += 10.0
 
-            # Bonus for being upright (orientation close to 1.0)
-            upright_bonus = 5.0 * orientation  # Max 5.0 when perfectly upright
-            reward += upright_bonus
-
-            # Bonus for low angular velocity (not wobbling)
-            omega_magnitude = np.linalg.norm(omega)
-            stability_bonus = 5.0 * np.exp(-2.0 * omega_magnitude**2)
-            reward += stability_bonus
-
-            # Bonus for low linear velocity (not drifting)
-            v_magnitude = np.linalg.norm(v[:2])  # xy velocity
-            stillness_bonus = 3.0 * np.exp(-5.0 * v_magnitude**2)
-            reward += stillness_bonus
-
-            # Feet must be on ground while standing
-            feet_count = self._get_feet_contact_count()
+            # Bonus for feet on ground while standing
             if feet_count >= 2:
-                reward += 3.0  # Good foot contact
-            elif feet_count == 0:
-                reward -= 10.0  # Jumping/falling penalty
+                reward += 5.0
 
-        # Penalty for falling after having been up
-        elif h_base < 0.5 and h_pelvis < 0.3:
-            # Fell down - penalize
-            reward -= 5.0
+            # Small bonus for low velocity (stable)
+            v_magnitude = np.linalg.norm(v)
+            reward += 2.0 * np.exp(-v_magnitude**2)
+
+        # Extra bonus for good standing
+        if h_base > 1.15 and h_pelvis > 0.85:
+            reward += 5.0
+
+        # === GENTLE ANTI-JUMPING (only when clearly airborne) ===
+        # Only penalize if high up AND no feet contact AND moving up
+        if h_pelvis > 0.7 and feet_count == 0 and v_z > 1.0:
+            reward -= 3.0  # Gentle penalty
 
         return reward
 
     def compute_task_reward(self):
-        """Compute total task reward."""
+        """
+        Compute total task reward using MULTIPLICATIVE structure (HoST paper).
+
+        Key insight: By multiplying orientation and height rewards, the robot
+        MUST satisfy BOTH constraints simultaneously. Poor balance crashes the episode.
+        """
         r_head = self.task_head_height()
         r_orient = self.task_base_orientation()
         r_progressive = self.task_progressive_height()
         r_feet = self.task_feet_contact()
         r_stability = self.task_standing_stability()
-        return r_head + r_orient + r_progressive + r_feet + r_stability
+
+        # MULTIPLICATIVE core task rewards (HoST key design)
+        # Must satisfy both orientation AND height to get reward
+        core_task = r_head * r_orient
+
+        # ADDITIVE auxiliary rewards (help with learning signal)
+        auxiliary = r_progressive + r_feet + r_stability
+
+        return core_task + auxiliary
 
     # =========================================================================
     # (b) STYLE REWARDS (w^style = 1)

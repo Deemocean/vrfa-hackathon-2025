@@ -23,7 +23,7 @@ import mujoco.viewer
 import numpy as np
 import os
 
-from rewards import HoSTRewardCalculator
+from host_rewards import HoSTRewardCalculator as RewardCalculator
 
 
 class G1Env(gym.Env):
@@ -48,7 +48,7 @@ class G1Env(gym.Env):
         self.viewer = None
 
         # Episode parameters (from paper: 2000 timesteps per episode)
-        self.max_episode_steps = 1000
+        self.max_episode_steps = 800
         self.current_step = 0
 
         # Define spaces
@@ -68,8 +68,18 @@ class G1Env(gym.Env):
         self._assistive_force_decay = 0.9999  # Decay per step
         self._min_assistive_force = 0.0  # Final force
 
+        # HoST-style curriculum parameters
+        self._curriculum_force_reduction = 20.0  # Force reduction when threshold met
+        self._curriculum_height_threshold = 0.9  # Height to trigger force reduction
+        self._height_history = []  # Track recent heights for curriculum
+        self._height_history_len = 100  # Window for averaging
+
         # HoST reward calculator
-        self.reward_calc = HoSTRewardCalculator(self.model, self.data)
+        self.reward_calc = RewardCalculator(self.model, self.data)
+
+        # Observation history for temporal features (HoST uses 6 frames)
+        self._obs_history_len = 6
+        self._obs_history = []
 
 
     def _get_obs(self):
@@ -98,13 +108,28 @@ class G1Env(gym.Env):
         mujoco.mj_step(self.model, self.data)
         self.current_step += 1
 
-        # Decay assistive force over time
+        # HoST-style curriculum: reduce force when robot achieves height
+        self._height_history.append(base_height)
+        if len(self._height_history) > self._height_history_len:
+            self._height_history.pop(0)
+
+        # If mean height exceeds threshold, reduce assistive force (HoST curriculum)
+        if len(self._height_history) >= self._height_history_len:
+            mean_height = np.mean(self._height_history)
+            if mean_height > self._curriculum_height_threshold:
+                self._assistive_force = max(
+                    self._min_assistive_force,
+                    self._assistive_force - self._curriculum_force_reduction
+                )
+                self._height_history = []  # Reset history after reduction
+
+        # Also decay assistive force over time (backup curriculum)
         self._assistive_force = max(
             self._min_assistive_force,
             self._assistive_force * self._assistive_force_decay
         )
 
-        # === REWARD FUNCTION (HoST paper) ===
+        # === REWARD FUNCTION  ===
         torques = self.data.ctrl
         reward, info = self.reward_calc.compute_reward(action, torques)
 
@@ -143,6 +168,9 @@ class G1Env(gym.Env):
 
         # Reset reward calculator state
         self.reward_calc.reset()
+
+        # Reset observation history
+        self._obs_history = []
 
         return self._get_obs(), {}
 
@@ -375,7 +403,6 @@ def test(model_path: str = None, vecnorm_path: str = None, log_dir: str = "./log
     print("Testing trained model... (Close window to exit)")
 
     total_reward = 0
-    episode_count = 0
 
     try:
         while True:
@@ -392,10 +419,10 @@ def test(model_path: str = None, vecnorm_path: str = None, log_dir: str = "./log
             time.sleep(0.02)
 
             if dones[0]:
-                episode_count += 1
-                print(f"Episode {episode_count} - Total Reward: {total_reward:.2f}")
-                total_reward = 0
-                obs = env.reset()
+                env.close()
+                print(f"Total reward: {total_reward:.2f}")
+                break
+                
 
     except KeyboardInterrupt:
         print("\nTesting interrupted")
@@ -409,7 +436,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train or test PPO on HumanoidStandup")
     parser.add_argument("mode", choices=["train", "test"], default="train", nargs="?",
                         help="Mode: train or test")
-    parser.add_argument("--timesteps", type=int, default=10_000_000,
+    parser.add_argument("--timesteps", type=int, default=20_000_000,
                         help="Total training timesteps (default: 10M)")
     parser.add_argument("--n-envs", type=int, default=16,
                         help="Number of parallel environments (default: 8)")
